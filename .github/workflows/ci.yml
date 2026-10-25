@@ -1,0 +1,71 @@
+# 插件仓库 CI
+#
+# 与框架仓库的 CI 相比多出三步，原因均在 README 与 .npmrc 中有说明：
+#
+# 1. 检出框架仓库。`@yunzai-ng/core` 与 `types` 是 peerDependencies，且 `.npmrc` 中
+#    `auto-install-peers=false`，因此 `pnpm install` 不会安装它们；框架发布到 npm
+#    之前也无从安装。
+# 2. 构建框架。`tsc -b` 读的是框架的 `dist/*.d.ts`，仅检出源码不足以编译本插件。
+# 3. 执行 `link:framework`。**该脚本不是 postinstall 钩子**，必须显式调用，
+#    否则 build 会报 `Cannot find module "@yunzai-ng/core"`。
+#
+# 另外覆盖 registry：仓库内 `.npmrc` 指向 npmmirror（国内网络环境），
+# 而 GitHub 的 runner 位于境外，走官方源更快且更稳。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出本插件
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      # 与本插件平级检出，正是 link-framework.mjs 查找顺序中的 `../yunzai-ng`
+      - name: 检出框架
+        uses: actions/checkout@v4
+        with:
+          repository: Yunzai-NG/yunzai-ng
+          path: yunzai-ng
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          registry-url: https://registry.npmjs.org
+
+      - name: 构建框架
+        working-directory: yunzai-ng
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: 安装本插件依赖
+        working-directory: plugin
+        run: pnpm install --frozen-lockfile
+
+      # 显式调用：该脚本未挂在 postinstall 上
+      - name: 链接框架包
+        working-directory: plugin
+        env:
+          YZNG_FRAMEWORK: ${{ github.workspace }}/yunzai-ng
+        run: pnpm run link:framework
+
+      - name: 校验
+        working-directory: plugin
+        run: pnpm run verify

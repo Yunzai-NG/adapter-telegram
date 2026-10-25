@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  /*
+   * 独立仓库，不再使用 project references。
+   *
+   * `@yunzai-ng/core` 与 `@yunzai-ng/types` 经 node_modules 解析：
+   * 发布前由 `pnpm run link:framework` 建立链接（指向框架 checkout），
+   * 发布后由 `pnpm install` 落盘。两种情形下 tsc 读到的都是框架的 `dist/*.d.ts`，
+   * 因此**框架必须先构建**，否则报找不到模块。
+   */
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}
