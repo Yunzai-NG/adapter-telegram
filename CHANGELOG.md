@@ -21,6 +21,7 @@
 ### 注意
 
 - 错误信息里的 Token 一律替换为 `[REDACTED]`（Bot API 把 Token 放在 URL 路径里，内核的打码管不到）。
-- 收到的媒体只给 file_id，不给下载地址：下载地址里含 Token。
+- 收到的媒体只给 file_id，不给下载地址：下载地址里含 Token。机器人自己的头像由 `getSelfInfo()`
+  经账号代理下载后以 `data:` URL 给出（缓存一小时）。
 
 57 条用例。

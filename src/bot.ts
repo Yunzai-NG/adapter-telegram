@@ -33,6 +33,7 @@ import type {
   SendTarget,
   UserInfo
 } from "@yunzai-ng/types"
+import { readFile } from "node:fs/promises"
 import { parseDuration, seg, toSegments } from "@yunzai-ng/core"
 import { createTelegramApi, TelegramApiError } from "./api.js"
 import type { TelegramApi } from "./api.js"
@@ -44,12 +45,12 @@ import { encodeMessage } from "./encode.js"
 import type { EncodeDeps, InlineButton, MentionTarget, OutgoingOp } from "./encode.js"
 import { chatTitle, decodeUpdate, isGroupChat, toGroup, usersOf } from "./events.js"
 import type { EventContext } from "./events.js"
-import { imageSize, loadMedia } from "./media.js"
+import { imageSize, loadMedia, sniffMime } from "./media.js"
 import type { UploadFile } from "./media.js"
 import { Poller } from "./poller.js"
 import type { PollerTimings } from "./poller.js"
 import { PLATFORM, decodeMessageId, encodeMessageId, fromId, toId } from "./platform.js"
-import type { TgChat, TgChatMember, TgChatPermissions, TgFileInfo, TgMessage, TgUpdate, TgUser } from "./types.js"
+import type { TgChat, TgChatMember, TgChatPermissions, TgFileInfo, TgMessage, TgPhotoSize, TgUpdate, TgUser } from "./types.js"
 
 /**
  * 本适配器声明的可选能力
@@ -79,6 +80,12 @@ const OFFSET_TTL = "6d"
 
 /** 按钮长数据的保存期 */
 const CALLBACK_TTL = "30d"
+
+/** 自己的头像缓存多久 */
+const AVATAR_TTL = 3_600_000
+
+/** 头像取哪一档：不小于这个宽度的最小一档 */
+const AVATAR_SIZE = 160
 
 /** 只有按钮、没有正文时补的占位文字 */
 const KEYBOARD_PLACEHOLDER = "请选择"
@@ -571,6 +578,55 @@ export function createTelegramBot(account: TelegramAccount, host: AdapterHost, d
     return out
   }
 
+  /**
+   * file_id → 下载地址或本机绝对路径
+   * @param fileId file_id
+   * @returns 地址（含 token）或路径
+   */
+  const resolveFile = async (fileId: string): Promise<string> => {
+    const file = await api.call<TgFileInfo>("getFile", { file_id: fileId })
+    if (file.file_path === undefined || file.file_path === "") {
+      throw new Error("Telegram 没有给出下载路径：官方 Bot API 只能下载 20MB 以内的文件，更大的需自建 Bot API 服务器")
+    }
+    // 自建 Bot API 服务器开了 --local 时，file_path 是那台机器上的绝对路径
+    if (/^(\/|[A-Za-z]:[\\/])/.test(file.file_path)) return file.file_path
+    return api.fileUrl(file.file_path)
+  }
+
+  /** 头像的 `data:` URL；空串表示查过、没设头像 */
+  let avatarCache: { value: string; at: number } | undefined
+
+  /**
+   * 取机器人自己的头像，转成 `data:` URL
+   *
+   * 不交出下载地址：地址里含 token，调用方（状态图之类）会把它写进日志、交给浏览器去拉。
+   * 在这里经账号代理下载好再交出去，token 不出适配器，调用方也不必能连上 api.telegram.org。
+   * 结果缓存一小时；失败不缓存，下次再试。
+   * @returns `data:` URL；没设头像或取不到时 undefined
+   */
+  const selfAvatar = async (): Promise<string | undefined> => {
+    if (avatarCache !== undefined && Date.now() - avatarCache.at < AVATAR_TTL) return avatarCache.value || undefined
+    if (self === undefined) return undefined
+    try {
+      const photos = await api.call<{ photos?: TgPhotoSize[][] }>("getUserProfilePhotos", { user_id: self.id, limit: 1 })
+      const sizes = photos.photos?.[0] ?? []
+      // 状态图里只有 100px 见方：取不小于 AVATAR_SIZE 的最小一档，都不够就取最大的
+      const pick = [...sizes].sort((a, b) => a.width - b.width).find(p => p.width >= AVATAR_SIZE) ?? sizes.at(-1)
+      if (pick === undefined) {
+        avatarCache = { value: "", at: Date.now() }
+        return undefined
+      }
+      const where = await resolveFile(pick.file_id)
+      const data = where.startsWith("/") || /^[A-Za-z]:[\\/]/.test(where) ? await readFile(where) : await download(where)
+      const value = `data:${sniffMime(data) ?? "image/jpeg"};base64,${Buffer.from(data).toString("base64")}`
+      avatarCache = { value, at: Date.now() }
+      return value
+    } catch (err) {
+      host.logger.debug(`获取头像失败：${api.redact(errText(err))}`)
+      return undefined
+    }
+  }
+
   const driver: BotDriver = {
     platform: PLATFORM,
     adapterId: deps.adapterId,
@@ -645,7 +701,10 @@ export function createTelegramBot(account: TelegramAccount, host: AdapterHost, d
     },
 
     async getSelfInfo(): Promise<UserInfo> {
-      return toUser(await api.call<TgUser>("getMe"))
+      const info = toUser(await api.call<TgUser>("getMe"))
+      const avatar = await selfAvatar()
+      if (avatar !== undefined) info.avatar = avatar
+      return info
     },
 
     async getFriend(uid: string): Promise<UserInfo | undefined> {
@@ -757,15 +816,7 @@ export function createTelegramBot(account: TelegramAccount, host: AdapterHost, d
       if (/^-?\d+$/.test(chatId)) forgetChat(Number(chatId))
     },
 
-    async getFileUrl(fileId: string): Promise<string> {
-      const file = await api.call<TgFileInfo>("getFile", { file_id: fileId })
-      if (file.file_path === undefined || file.file_path === "") {
-        throw new Error("Telegram 没有给出下载路径：官方 Bot API 只能下载 20MB 以内的文件，更大的需自建 Bot API 服务器")
-      }
-      // 自建 Bot API 服务器开了 --local 时，file_path 是那台机器上的绝对路径
-      if (/^(\/|[A-Za-z]:[\\/])/.test(file.file_path)) return file.file_path
-      return api.fileUrl(file.file_path)
-    },
+    getFileUrl: resolveFile,
 
     async callApi<T = unknown>(action: string, params?: Record<string, unknown>): Promise<T> {
       return api.call<T>(action, params ?? {})

@@ -50,6 +50,7 @@ export function displayName(user: Pick<TgUser, "first_name" | "last_name" | "use
  * Telegram 用户 → 通用用户信息
  *
  * 不填 `avatar`：头像只能经 `getFile` 拿到一个含 token 的地址（见文件头第四点）。
+ * 机器人自己的头像例外，由 bot.ts 的 `getSelfInfo()` 下载好以 `data:` URL 给出。
  * @param user 用户
  * @returns 用户信息
  */

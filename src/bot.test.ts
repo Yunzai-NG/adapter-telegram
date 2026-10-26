@@ -80,6 +80,8 @@ interface FakeTelegram {
   routes: Record<string, Handler>
   /** token 是否已被吊销（之后一律 401） */
   revoked: boolean
+  /** 经 /file/bot<token>/ 下载过的路径 */
+  downloads: string[]
   /** 推送更新 */
   push(...updates: TgUpdate[]): void
   /** 取某个方法的调用 */
@@ -102,6 +104,7 @@ async function startFakeTelegram(): Promise<FakeTelegram> {
     base: "",
     requests: [],
     revoked: false,
+    downloads: [],
     routes: {
       getMe: () => ({ id: 9000, is_bot: true, first_name: "测试机器人", username: "TestBot" }),
       getWebhookInfo: () => ({ url: "" }),
@@ -152,6 +155,13 @@ async function startFakeTelegram(): Promise<FakeTelegram> {
     req.on("data", (c: Buffer) => chunks.push(c))
     req.on("end", () => {
       void (async () => {
+        const file = /^\/file\/bot([^/]+)\/(.+)$/.exec(req.url ?? "")
+        if (file !== null) {
+          fake.downloads.push(file[2]!)
+          res.statusCode = file[1] === TOKEN ? 200 : 401
+          res.end(file[1] === TOKEN ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) : "")
+          return
+        }
         res.setHeader("Content-Type", "application/json")
         const m = /^\/bot([^/]+)\/(\w+)$/.exec(req.url ?? "")
         if (m === null || m[1] !== TOKEN || fake.revoked) {
@@ -554,6 +564,30 @@ describe("其他接口", () => {
     expect(await driver.getFileUrl!("AgAD")).toBe(`${fake.base}/file/bot${TOKEN}/photos/file_1.jpg`)
     fake.routes["getFile"] = () => ({ file_id: "x", file_path: "/var/lib/telegram-bot-api/123/photos/a.jpg" })
     expect(await driver.getFileUrl!("x")).toBe("/var/lib/telegram-bot-api/123/photos/a.jpg")
+  })
+
+  it("getSelfInfo 带上头像：适配器自己下载、给 data: URL，地址里的 token 不外露；结果缓存", async () => {
+    const { fake, driver } = await connected()
+    fake.routes["getUserProfilePhotos"] = () => ({
+      total_count: 1,
+      photos: [[{ file_id: "s", width: 160, height: 160 }, { file_id: "m", width: 320, height: 320 }, { file_id: "l", width: 640, height: 640 }]]
+    })
+    const info = await driver.getSelfInfo()
+    expect(info).toMatchObject({ uid: "tg_9000", name: "测试机器人" })
+    expect(info.avatar).toBe(`data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64")}`)
+    expect(fake.calls("getFile")[0]!.body["file_id"]).toBe("s")
+    await driver.getSelfInfo()
+    expect(fake.downloads).toHaveLength(1)
+  })
+
+  it("没设头像、或取头像失败时 getSelfInfo 照常返回，不带 avatar", async () => {
+    const { fake, driver } = await connected()
+    fake.routes["getUserProfilePhotos"] = () => ({ total_count: 0, photos: [] })
+    expect((await driver.getSelfInfo()).avatar).toBeUndefined()
+
+    const other = await connected()
+    other.fake.routes["getUserProfilePhotos"] = () => new TgError(500, "Internal Server Error")
+    expect(await other.driver.getSelfInfo()).toEqual({ uid: "tg_9000", name: "测试机器人" })
   })
 
   it("踢人 = 封禁后立即解封；拒绝再加群时只封禁", async () => {
